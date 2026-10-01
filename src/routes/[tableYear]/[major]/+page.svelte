@@ -9,5 +9,7 @@
 {#if data.closed}
   <ClosedNotice name={data.majorJa} />
 {:else}
-  <MajorApp config={data.config} />
+  {#key `${data.config.major}_${data.config.tableYear}`}
+    <MajorApp config={data.config} />
+  {/key}
 {/if}

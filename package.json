@@ -3,6 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "start": "tsx scripts/server.ts",
+    "test:server": "tsx scripts/test-server.ts",
     "dev": "vite dev",
     "build": "npm run lint-grade-csvs && npm t && vite build",
     "preview": "vite preview",
