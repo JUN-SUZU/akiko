@@ -15,24 +15,61 @@
   let studentId = $state("");
   let studentIdInput = $state("");
   let cookieChecked = $state(false);
+  let checking = $state(false);
+  let sessionError = $state("");
+  let accessEmail = $state("");
   setContext<StudentSession>(STUDENT_SESSION, {
     get studentId() {
       return studentId;
     },
   });
 
-  onMount(() => {
+  async function verifyStudentId(id: string): Promise<boolean> {
     try {
-      studentId = studentIdFromCookies(document.cookie) ?? "";
+      const response = await fetch(`${base}/api/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ studentId: id }),
+      });
+      if (response.ok) return true;
+      sessionError = response.status === 403
+        ? "入力された学生IDは、Cloudflare Access のメールアドレスに紐づいていません。管理者に確認してください。"
+        : "学生IDを確認できませんでした。再読み込みしてもう一度お試しください。";
     } catch {
-      studentId = "";
+      sessionError = "サーバーに接続できません。接続を確認して再読み込みしてください。";
     }
-    cookieChecked = true;
+    return false;
+  }
+
+  onMount(() => {
+    void (async () => {
+      try {
+        const response = await fetch(`${base}/api/session`);
+        if (!response.ok) throw new Error("Access session unavailable");
+        const identity = (await response.json()) as { mode: string; email?: string };
+        accessEmail = identity.mode === "access" ? (identity.email ?? "") : "";
+        const savedId = studentIdFromCookies(document.cookie);
+        if (savedId && await verifyStudentId(savedId)) {
+          studentId = savedId;
+        } else if (savedId) {
+          document.cookie = `akiko_student_id=; Path=${base || "/"}; Max-Age=0; SameSite=Lax`;
+        }
+      } catch {
+        sessionError = "認証状態を確認できません。Cloudflare Access にログインし、再読み込みしてください。";
+      } finally {
+        cookieChecked = true;
+      }
+    })();
   });
 
-  function identify(event: SubmitEvent) {
+  async function identify(event: SubmitEvent) {
     event.preventDefault();
-    if (isStudentId(studentIdInput)) {
+    if (isStudentId(studentIdInput) && !checking) {
+      checking = true;
+      sessionError = "";
+      const valid = await verifyStudentId(studentIdInput);
+      checking = false;
+      if (!valid) return;
       try {
         document.cookie = studentIdCookie(
           studentIdInput,
@@ -82,6 +119,8 @@
       <p>
         学生IDを入力してください。入力したIDの履修データをサーバーに保存します。
       </p>
+      {#if accessEmail}<p>Access アカウント: {accessEmail}</p>{/if}
+      {#if sessionError}<p class="error" role="alert">{sessionError}</p>{/if}
       <label for="student-id">学生ID（s＋7桁の数字）</label>
       <input
         id="student-id"
@@ -97,7 +136,7 @@
         spellcheck="false"
         required
       />
-      <button type="submit" disabled={!isStudentId(studentIdInput)}
+      <button type="submit" disabled={!isStudentId(studentIdInput) || checking}
         >開始する</button
       >
       <p>学生IDをCookieに保存し、次回から自動で読み込みます。</p>
@@ -110,12 +149,17 @@
 
   .student-gate {
     min-height: 100vh;
+    min-height: 100dvh;
+    width: 100%;
     display: grid;
     place-items: center;
     padding: 20px;
     box-sizing: border-box;
 
     form {
+      box-sizing: border-box;
+      width: min(100%, 420px);
+      min-width: 0;
       max-width: 420px;
       display: grid;
       gap: 16px;
@@ -126,12 +170,18 @@
 
     input,
     button {
+      box-sizing: border-box;
+      min-width: 0;
+      width: 100%;
       padding: 12px;
       font-size: 1rem;
     }
     h1,
     p {
       margin: 0;
+    }
+    .error {
+      color: #a32121;
     }
   }
 
@@ -172,7 +222,12 @@
     body {
       margin: 0;
       padding: 0;
-      padding-bottom: 50vh;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .student-gate form {
+      padding: 20px;
     }
   }
 </style>

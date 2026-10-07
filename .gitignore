@@ -1,5 +1,6 @@
 node_modules
-/data
+/data/
+/data-*/
 
 # Output
 .output
@@ -17,7 +18,12 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-!.env.test
+.envrc
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Vite
 vite.config.js.timestamp-*

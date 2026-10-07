@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx scripts/server.ts",
+    "start": "node --env-file-if-exists=.env --import tsx scripts/server.ts",
     "test:server": "tsx scripts/test-server.ts",
+    "test:access": "tsx scripts/test-access.ts",
+    "student:bind": "node --env-file-if-exists=.env --import tsx scripts/bind-student.ts",
     "dev": "vite dev",
     "build": "npm run lint-grade-csvs && npm t && vite build",
     "preview": "vite preview",
@@ -37,6 +39,7 @@
     "vite": "^8.0.1"
   },
   "dependencies": {
+    "jose": "^6.2.12",
     "lucide-svelte": "^1.0.1",
     "papaparse": "^5.5.3",
     "zod": "^4.3.6"

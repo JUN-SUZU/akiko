@@ -11,6 +11,8 @@ import { localDataFromJson, localDataToJson } from "../src/lib/local-data.ts";
 import { localDataDefault } from "../src/lib/local-data.ts";
 import { isStudentId } from "../src/lib/student-session.ts";
 import { requestOriginAllowed } from "./request-origin.ts";
+import { accessIdentity } from "./access-auth.ts";
+import { readBindings } from "./student-bindings.ts";
 
 const root = resolve("build");
 const dataDir = resolve(process.env.DATA_DIR ?? "data");
@@ -72,6 +74,38 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
   if (base && pathname !== base && !pathname.startsWith(`${base}/`))
     return respond(res, 404, { error: "Not found" });
   const route = pathname.slice(base.length) || "/";
+  const identity = route.startsWith("/api/") ? await accessIdentity(req) : null;
+  if (route.startsWith("/api/") && !identity)
+    return respond(res, 401, { error: "Cloudflare Access authentication required" });
+  if (route === "/api/session") {
+    if (req.method === "GET")
+      return respond(res, 200, identity);
+    if (req.method !== "POST")
+      return respond(res, 405, { error: "Method not allowed" });
+    if (!requestOriginAllowed(req, publicOrigin))
+      return respond(res, 403, { error: "Invalid origin" });
+    let body: unknown;
+    try {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of req) {
+        size += Buffer.byteLength(chunk as Uint8Array);
+        if (size > 1024) return respond(res, 413, { error: "Too large" });
+        chunks.push(Buffer.from(chunk as Uint8Array));
+      }
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return respond(res, 400, { error: "Invalid JSON" });
+    }
+    const requestedId = body && typeof body === "object" && "studentId" in body
+      ? body.studentId : undefined;
+    if (!isStudentId(requestedId))
+      return respond(res, 400, { error: "Invalid student ID" });
+    if (identity?.mode === "access" &&
+      (await readBindings())[identity.email] !== requestedId)
+      return respond(res, 403, { error: "This student ID is not bound to your Access email" });
+    return respond(res, 200, { verified: true });
+  }
   if (route.startsWith("/api/students/")) {
     const parts = route.slice("/api/students/".length).split("/");
     const [studentId, scope] = parts;
@@ -85,6 +119,9 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
       return respond(res, 405, { error: "Method not allowed" });
     if (!requestOriginAllowed(req, publicOrigin))
       return respond(res, 403, { error: "Invalid origin" });
+    if (identity?.mode === "access" &&
+      (await readBindings())[identity.email] !== studentId)
+      return respond(res, 403, { error: "This student ID is not bound to your Access email" });
     const file = resolve(
       dataDir,
       `student-${createHash("sha256").update(studentId).digest("hex")}-${scope}.json`,

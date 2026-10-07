@@ -114,6 +114,7 @@
   let dataLoading = $state(false);
   let saveStatus = $state<"saving" | "saved" | "error">("saved");
   let initialOverrides = $state(initialData.listKindOverrides);
+  let plannedYears = $state(initialData.plannedYears);
   let autosave: ServerAutosave | undefined;
   let mounted = true;
 
@@ -121,6 +122,7 @@
     return {
       version: 3,
       listKindOverrides: svelteAkiko.getListKindOverrides(),
+      plannedYears,
       realCourses: Array.from(realCourses),
       fakeCourses: Array.from(fakeCourses),
       native: isNative,
@@ -131,6 +133,7 @@
     const data = localDataFromJson(json);
     if (!data) throw new Error("保存データの形式が正しくありません。");
     initialOverrides = data.listKindOverrides;
+    plannedYears = data.plannedYears;
     realCourses = data.realCourses;
     fakeCourses = data.fakeCourses;
     isNative = data.native;
@@ -304,6 +307,7 @@
     const json = localDataToJson({
       version: 3,
       listKindOverrides,
+      plannedYears,
       realCourses: Array.from(realCourses),
       fakeCourses: Array.from(fakeCourses),
       native: isNative,
@@ -316,9 +320,34 @@
   let timetableShowTaken = $state(true);
   let timetableYear = $state(untrack(() => config.knownCourseYear));
   let activeTimetableTerm = $state<TimetableTab>("spring-a");
+  const planYearOptions = $derived(
+    Array.from(
+      new Set([
+        ...Array.from(
+          {
+            length: Math.max(8, config.knownCourseYear - config.tableYear + 6),
+          },
+          (_, index) => config.tableYear + index,
+        ),
+        ...plannedYears.values(),
+        timetableYear,
+      ]),
+    ).sort((a, b) => a - b),
+  );
 
   let barsVisible = $state(true);
   let activeTab = $state<Tab>("courses");
+  let compactLayout = $state(
+    browser ? window.matchMedia("(max-width: 1350px)").matches : false,
+  );
+
+  onMount(() => {
+    const query = window.matchMedia("(max-width: 1350px)");
+    const update = () => (compactLayout = query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  });
 
   const SIDEBAR_MARGIN = 100;
   const SIDEBAR_WIDTH_DEFAULT = 740;
@@ -371,7 +400,7 @@
 
   $effect(() => {
     const update = () => {
-      if (rightBarEl === undefined) return;
+      if (!rightBarEl) return;
       document.documentElement.style.setProperty(
         "--right-bar-top",
         `${rightBarEl.getBoundingClientRect().top}px`,
@@ -391,7 +420,7 @@
   }
 
   function onTimetableResizePointerMove(e: PointerEvent) {
-    if (!timetableHeightResizing || rightBarEl === undefined) return;
+    if (!timetableHeightResizing || !rightBarEl) return;
     const top = rightBarEl.getBoundingClientRect().top;
     const raw = e.clientY - top;
     const snapped = Math.round(raw / 5) * 5;
@@ -468,6 +497,7 @@
     newFakeCourses: FakeCourse[],
   ) {
     initialOverrides = new Map();
+    plannedYears = new Map();
     realCourses = newRealCourses;
     fakeCourses = newFakeCourses;
     trackEvent(
@@ -543,14 +573,15 @@
     dropGuide = undefined;
   }
 
-  function handleDrop(event: DragEvent, dst: "wont-take" | "might-take") {
-    event.preventDefault();
-    const courseId = event.dataTransfer?.getData("text/plain");
-    if (courseId === undefined || !isCourseId(courseId)) return;
+  function moveCourse(courseId: CourseId, dst: "wont-take" | "might-take") {
     // undefined means the course actually moved (see akikoMoveCourse); only
     // track real moves so no-op re-drops onto the same list don't count.
     if (svelteAkiko.moveCourse(courseId, dst) === undefined) {
       initialOverrides = new Map(svelteAkiko.getListKindOverrides());
+      const nextYears = new Map(plannedYears);
+      if (dst === "might-take") nextYears.set(courseId, timetableYear);
+      else nextYears.delete(courseId);
+      plannedYears = nextYears;
       trackEvent(
         "plan",
         dst === "might-take" ? "add-course" : "remove-course",
@@ -558,7 +589,6 @@
       );
     }
     if (dst === "might-take") {
-      timetableYear = config.knownCourseYear;
       const slots = knownCoursesMap.get(courseId)?.slots ?? [];
       const terms = slots
         .filter((s) => s.when.kind === "regular")
@@ -572,6 +602,28 @@
         activeTimetableTerm = terms[0];
       }
     }
+  }
+
+  function handleDrop(event: DragEvent, dst: "wont-take" | "might-take") {
+    event.preventDefault();
+    const courseId = event.dataTransfer?.getData("text/plain");
+    if (courseId === undefined || !isCourseId(courseId)) return;
+    moveCourse(courseId, dst);
+  }
+
+  function plannedYearFor(courseId: CourseId): number {
+    return (
+      plannedYears.get(courseId) ??
+      (realCoursesMap.get(courseId)?.grade === "wip"
+        ? realCoursesMap.get(courseId)?.takenYear
+        : undefined) ??
+      config.knownCourseYear
+    );
+  }
+
+  function updatePlannedYear(courseId: CourseId, year: number) {
+    plannedYears = new Map(plannedYears).set(courseId, year);
+    timetableYear = year;
   }
 
   // Does not depend on wontTakeFilters
@@ -629,7 +681,13 @@
     };
   });
 
-  const occupiedSlots = $derived(svelteAkiko.getOccupiedSlots());
+  const mightTakeCourseIds = $derived(svelteAkiko.getMightTakeCourseIds());
+  const plannedForTimetable = $derived(
+    mightTakeCourseIds.filter((id) => plannedYearFor(id) === timetableYear),
+  );
+  const occupiedSlots = $derived(
+    svelteAkiko.getOccupiedSlots(new Set(plannedForTimetable)),
+  );
 
   /**
    * 学期と曜日のフィルタに当てはまるか。学期と曜日は同じ Slot が両方を満たす必要
@@ -700,6 +758,11 @@
 
   const fakeCreditTotal = $derived(
     filteredCourseLists.fake.reduce((sum, c) => sum + (c.credit ?? 0), 0),
+  );
+  const plannedYearCredits = $derived(
+    courseLists.mightTake
+      .filter((c) => plannedYearFor(c.id) === timetableYear)
+      .reduce((sum, c) => sum + (c.credit ?? 0), 0),
   );
 
   const availableCredits = $derived.by(() => {
@@ -790,6 +853,13 @@
 
   $effect(() => {
     void selectedCellId;
+    void wontTakeFilters.courseIdOrName;
+    void wontTakeFilters.credit;
+    void wontTakeFilters.expects;
+    void wontTakeFilters.term;
+    void wontTakeFilters.dows;
+    void wontTakeFilters.onlyUnoccupied;
+    void wontTakeFilters.onlyMatchingTarget;
     wontTakeVisibleLimit = 100;
   });
   $effect(() => {
@@ -822,11 +892,12 @@
       ? config.getRemark?.(selectedCellId, config.tableYear, config.major)
       : undefined,
   );
-  const mightTakeCourseIds = $derived(svelteAkiko.getMightTakeCourseIds());
   const listKindOverrides = $derived(svelteAkiko.getListKindOverrides());
   const takenCourseIds = $derived(svelteAkiko.getTakenCourseIds());
   const unclassifiedCourses = $derived(svelteAkiko.getUnclassifiedCourses());
-  const exportForTwinsResult = $derived(svelteAkiko.exportForTwins());
+  const exportForTwinsResult = $derived(
+    svelteAkiko.exportForTwins(new Set(plannedForTimetable)),
+  );
   const uiJizentouroku = $derived.by((): UiJizentourokuCourse[] => {
     return exportForTwinsResult.jizentouroku.map((kc) => {
       const rc = realCoursesMap.get(kc.id);
@@ -858,7 +929,11 @@
   });
 
   function exportMightTake() {
-    if (exportForTwinsResult.kind !== "ok") return;
+    if (
+      exportForTwinsResult.kind !== "ok" ||
+      exportForTwinsResult.toExport.length === 0
+    )
+      return;
     const content = exportForTwinsResult.toExport.map((c) => c.id).join("\n");
     trackEvent(
       "export",
@@ -868,7 +943,7 @@
     );
     const a = document.createElement("a");
     a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(content);
-    a.download = "科目番号一覧.csv";
+    a.download = `${timetableYear}年度-科目番号一覧.csv`;
     a.click();
   }
 
@@ -1024,6 +1099,13 @@
       rect.y + rect.height / 2 - requirementsEl.clientHeight / 2;
   }
 
+  function focusCell(cellId: CellId) {
+    selectedCellId = cellId;
+    barsVisible = !compactLayout;
+    activeTab = "courses";
+    void tick().then(() => scrollCellIntoView(cellId));
+  }
+
   let dropGuide = $state<
     { left: number; top: number; width: number; height: number } | undefined
   >();
@@ -1037,9 +1119,14 @@
     for (const [colId] of creditStats.columns.entries()) {
       if (!columnIdIsElective(colId)) continue;
       const span = columnSpanEls[colId];
-      if (span) spans.push(span);
+      if (span?.isConnected && span.parentElement) spans.push(span);
     }
-    if (creditStats.elective && overallSpanEl) spans.push(overallSpanEl);
+    if (
+      creditStats.elective &&
+      overallSpanEl?.isConnected &&
+      overallSpanEl.parentElement
+    )
+      spans.push(overallSpanEl);
 
     const BORDER = 1;
     const PADDING = 5;
@@ -1051,9 +1138,8 @@
 
     // Batch read: measure all at once (single reflow)
     const measurements = spans.map((span) => {
-      assert(span.parentElement !== null);
       const maxWidth =
-        span.parentElement.getBoundingClientRect().width -
+        span.parentElement!.getBoundingClientRect().width -
         (BORDER + PADDING) * 2;
       const spanWidth = span.getBoundingClientRect().width;
       return { span, maxWidth, spanWidth };
@@ -1097,63 +1183,6 @@
   });
 
   // ----- Mobile unsupported detection -----
-  const MOBILE_UNSUPPORTED_MAX_WIDTH = 1024;
-  const MOBILE_UNSUPPORTED_MAX_HEIGHT = 700;
-  let mobileUnsupported = $state(false);
-  let mobileUnsupportedDismissed = $state(false);
-
-  function computeMobileUnsupported(
-    primaryCoarse: boolean,
-    primaryNoHover: boolean,
-    anyFine: boolean,
-    anyHover: boolean,
-    maxWidth: boolean,
-    maxHeight: boolean,
-  ): boolean {
-    const touchOnly = primaryCoarse && primaryNoHover && !anyFine && !anyHover;
-    const smallViewport = maxWidth || maxHeight;
-    return touchOnly && smallViewport;
-  }
-
-  $effect(() => {
-    if (!browser) return;
-
-    const queries = {
-      primaryCoarse: window.matchMedia("(pointer: coarse)"),
-      primaryNoHover: window.matchMedia("(hover: none)"),
-      anyFine: window.matchMedia("(any-pointer: fine)"),
-      anyHover: window.matchMedia("(any-hover: hover)"),
-      maxWidth: window.matchMedia(
-        `(max-width: ${MOBILE_UNSUPPORTED_MAX_WIDTH}px)`,
-      ),
-      maxHeight: window.matchMedia(
-        `(max-height: ${MOBILE_UNSUPPORTED_MAX_HEIGHT}px)`,
-      ),
-    };
-    const mediaQueryLists = Object.values(queries);
-
-    const update = () => {
-      mobileUnsupported = computeMobileUnsupported(
-        queries.primaryCoarse.matches,
-        queries.primaryNoHover.matches,
-        queries.anyFine.matches,
-        queries.anyHover.matches,
-        queries.maxWidth.matches,
-        queries.maxHeight.matches,
-      );
-    };
-
-    update();
-    for (const query of mediaQueryLists)
-      query.addEventListener("change", update);
-    window.addEventListener("resize", update);
-
-    return () => {
-      for (const query of mediaQueryLists)
-        query.removeEventListener("change", update);
-      window.removeEventListener("resize", update);
-    };
-  });
 </script>
 
 <Meta title={metaTitle} description={metaDescription} />
@@ -1177,14 +1206,8 @@
       <span class="course-id">{c.id}</span>
       {#if !selectedCellId && c.cellId !== undefined}
         {@const cellId = c.cellId}
-        <button
-          class="goto-cell"
-          onclick={() => {
-            selectedCellId = cellId;
-            scrollCellIntoView(cellId);
-            barsVisible = true;
-            activeTab = "courses";
-          }}>該当マスを表示</button
+        <button class="goto-cell" onclick={() => focusCell(cellId)}
+          >該当マスを表示</button
         >
       {/if}
       <br />
@@ -1196,6 +1219,32 @@
       >
       {#if c.grade}<br /><span>{gradeDisplay(c.grade)}</span>{/if}
       {#if c.availability !== "available"}<br /><span>（非開講）</span>{/if}
+      {#if dragSource === "wont-take"}
+        <div class="course-plan-actions">
+          <button type="button" onclick={() => moveCourse(c.id, "might-take")}
+            >{timetableYear}年度の予定に追加</button
+          >
+        </div>
+      {:else if dragSource === "might-take"}
+        <div class="course-plan-actions">
+          <label>
+            予定年度
+            <select
+              aria-label={`${c.name}の予定年度`}
+              value={plannedYearFor(c.id)}
+              onchange={(event) =>
+                updatePlannedYear(c.id, Number(event.currentTarget.value))}
+            >
+              {#each planYearOptions as year (year)}
+                <option value={year}>{year}年度</option>
+              {/each}
+            </select>
+          </label>
+          <button type="button" onclick={() => moveCourse(c.id, "wont-take")}
+            >予定から外す</button
+          >
+        </div>
+      {/if}
     </td>
     <td class="credit">{c.credit ?? "-"}</td>
     <td class="slots">{c.slots ?? "-"}</td>
@@ -1281,113 +1330,135 @@
 </div>
 {#if dataReady}
   <main class:bars-hidden={!barsVisible}>
-    <div id="table-view">
-      <div
-        id="requirements"
-        bind:this={requirementsEl}
-        onscroll={(e) => (scrollX = -e.currentTarget.scrollLeft)}
-        onclick={() => {
-          selectedCellId = undefined;
-        }}
+    <div id="view-switcher" role="group" aria-label="表示する画面">
+      <button
+        type="button"
+        class:active={!barsVisible}
+        aria-pressed={!barsVisible}
+        onclick={() => (barsVisible = false)}>卒業要件表</button
       >
-        <img
-          src={asset(`/tables/${config.tableYear}/${config.major}.svg`)}
-          alt="Table"
-          width={tableScale * zoomLevel * config.tableViewBox.width}
-          height={tableScale * zoomLevel * config.tableViewBox.height}
-          draggable="false"
-        />
-        <div id="title">
-          <a href={resolve("/")} class="akiko"
-            ><img src={asset("/images/akiko.png")} alt="あきこ" /></a
-          >
-          <span
-            >このページは <strong>{config.tableYear}</strong>
-            年度入学の
-            <strong>{MAJOR_TO_JA[config.major]}</strong> の学生向けですよ〜</span
-          >
-          <nav>
-            <a href="{resolve('/')}#app-page-links">学類一覧に戻る</a>
-            <a href={resolve("/docs")}>あきこの使い方</a>
-            <a
-              href="https://docs.google.com/forms/d/e/1FAIpQLSfUbueFsF6fbyJxCohNTqh5S8bYdxNgqx_HQ76RCR5TJQkpyQ/viewform?usp=dialog"
-              target="_blank"
-              rel="noreferrer">ご意見はこちらから</a
+      <button
+        type="button"
+        class:active={barsVisible}
+        aria-pressed={barsVisible}
+        onclick={() => (barsVisible = true)}>授業計画</button
+      >
+    </div>
+    {#if !compactLayout || !barsVisible}
+      <div id="table-view">
+        <div
+          id="requirements"
+          bind:this={requirementsEl}
+          onscroll={(e) => (scrollX = -e.currentTarget.scrollLeft)}
+          onclick={() => {
+            selectedCellId = undefined;
+          }}
+        >
+          <img
+            src={asset(`/tables/${config.tableYear}/${config.major}.svg`)}
+            alt="Table"
+            width={tableScale * zoomLevel * config.tableViewBox.width}
+            height={tableScale * zoomLevel * config.tableViewBox.height}
+            draggable="false"
+          />
+          <div id="title">
+            <a href={resolve("/")} class="akiko"
+              ><img src={asset("/images/akiko.png")} alt="あきこ" /></a
             >
-          </nav>
+            <span
+              >このページは <strong>{config.tableYear}</strong>
+              年度入学の
+              <strong>{MAJOR_TO_JA[config.major]}</strong> の学生向けですよ〜</span
+            >
+            <nav>
+              <a href="{resolve('/')}#app-page-links">学類一覧に戻る</a>
+              <a href={resolve("/docs")}>あきこの使い方</a>
+              <a
+                href="https://docs.google.com/forms/d/e/1FAIpQLSfUbueFsF6fbyJxCohNTqh5S8bYdxNgqx_HQ76RCR5TJQkpyQ/viewform?usp=dialog"
+                target="_blank"
+                rel="noreferrer">ご意見はこちらから</a
+              >
+            </nav>
+          </div>
+          {#each cellRects as r (r.id)}
+            {@const cellStats = creditStats.cells.get(r.id)}
+            {#if cellStats}
+              {@const [green, yellow] = getPercentage(
+                cellStats.effectiveTaken,
+                cellStats.effectiveMightTake,
+                cellStats.min,
+              )}
+              <div
+                class="cell"
+                class:selected={selectedCellId === r.id}
+                style="left:{r.x}px; top:{r.y}px; width:{r.width}px; height:{r.height}px; --green-percentage:{green}%; --yellow-percentage:{yellow}%"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  selectedCellId = r.id;
+                  barsVisible = true;
+                  activeTab = "courses";
+                }}
+              ></div>
+            {/if}
+          {/each}
         </div>
-        {#each cellRects as r (r.id)}
-          {@const cellStats = creditStats.cells.get(r.id)}
-          {#if cellStats}
+        <div id="credit-sums-container">
+          <div id="zoom-control">
+            <img src={asset("/icons/zoom-in.svg")} width="15" alt="zoom" />
+            <input
+              type="range"
+              min="0"
+              max={ZOOM_SLIDER_MAX}
+              step="0.01"
+              bind:value={sliderZoomLevel}
+            />
+          </div>
+          <div id="column-credit-sums" style="--x: {scrollX}px">
+            {#each uiColumnCredits as { colId, rect, display, green, yellow } (colId)}
+              <div
+                style="left:{rect.x}px; width:{rect.width}px; --green-percentage:{green}%; --yellow-percentage:{yellow}%"
+                data-message-on-click={display.warning}
+                onclick={() => display.warning && alert(display.warning)}
+              >
+                <img
+                  src={asset("/icons/warning.svg")}
+                  width="20"
+                  alt="warning"
+                />
+                <span bind:this={columnSpanEls[colId]}>{display.brief}</span>
+              </div>
+            {/each}
+          </div>
+          {#if creditStats.elective}
+            {@const s = creditStats.elective}
+            {@const display = electiveCreditStatsDisplay(s)}
             {@const [green, yellow] = getPercentage(
-              cellStats.effectiveTaken,
-              cellStats.effectiveMightTake,
-              cellStats.min,
+              s.effectiveTaken,
+              s.effectiveMightTake,
+              s.min,
             )}
             <div
-              class="cell"
-              class:selected={selectedCellId === r.id}
-              style="left:{r.x}px; top:{r.y}px; width:{r.width}px; height:{r.height}px; --green-percentage:{green}%; --yellow-percentage:{yellow}%"
-              onclick={(e) => {
-                e.stopPropagation();
-                selectedCellId = r.id;
-                barsVisible = true;
-                activeTab = "courses";
-              }}
-            ></div>
-          {/if}
-        {/each}
-      </div>
-      <div id="credit-sums-container">
-        <div id="zoom-control">
-          <img src={asset("/icons/zoom-in.svg")} width="15" alt="zoom" />
-          <input
-            type="range"
-            min="0"
-            max={ZOOM_SLIDER_MAX}
-            step="0.01"
-            bind:value={sliderZoomLevel}
-          />
-        </div>
-        <div id="column-credit-sums" style="--x: {scrollX}px">
-          {#each uiColumnCredits as { colId, rect, display, green, yellow } (colId)}
-            <div
-              style="left:{rect.x}px; width:{rect.width}px; --green-percentage:{green}%; --yellow-percentage:{yellow}%"
+              id="overall-credit-sum"
+              style="--green-percentage:{green}%; --yellow-percentage:{yellow}%"
               data-message-on-click={display.warning}
               onclick={() => display.warning && alert(display.warning)}
             >
               <img src={asset("/icons/warning.svg")} width="20" alt="warning" />
-              <span bind:this={columnSpanEls[colId]}>{display.brief}</span>
+              <span bind:this={overallSpanEl}>{display.brief}</span>
             </div>
-          {/each}
+          {/if}
         </div>
-        {#if creditStats.elective}
-          {@const s = creditStats.elective}
-          {@const display = electiveCreditStatsDisplay(s)}
-          {@const [green, yellow] = getPercentage(
-            s.effectiveTaken,
-            s.effectiveMightTake,
-            s.min,
-          )}
-          <div
-            id="overall-credit-sum"
-            style="--green-percentage:{green}%; --yellow-percentage:{yellow}%"
-            data-message-on-click={display.warning}
-            onclick={() => display.warning && alert(display.warning)}
-          >
-            <img src={asset("/icons/warning.svg")} width="20" alt="warning" />
-            <span bind:this={overallSpanEl}>{display.brief}</span>
-          </div>
-        {/if}
       </div>
-    </div>
+    {/if}
 
     <div id="sidebar">
       <div id="tab-header">
         <button
           class:active={activeTab === "import"}
           onclick={() => (activeTab = "import")}
-          ><span class="icon" style="--src: url({asset('/icons/math.svg')})"
+          ><span class="step-number" aria-hidden="true">1</span><span
+            class="icon"
+            style="--src: url({asset('/icons/math.svg')})"
           ></span>単位チェック</button
         >
         <span class="workflow-arrow" aria-hidden="true">
@@ -1396,7 +1467,9 @@
         <button
           class:active={activeTab === "courses"}
           onclick={() => (activeTab = "courses")}
-          ><span class="icon" style="--src: url({asset('/icons/book.svg')})"
+          ><span class="step-number" aria-hidden="true">2</span><span
+            class="icon"
+            style="--src: url({asset('/icons/book.svg')})"
           ></span>履修を組む</button
         >
         <span class="workflow-arrow" aria-hidden="true">
@@ -1405,7 +1478,9 @@
         <button
           class:active={activeTab === "export"}
           onclick={() => (activeTab = "export")}
-          ><span class="icon" style="--src: url({asset('/icons/itf.svg')})"
+          ><span class="step-number" aria-hidden="true">3</span><span
+            class="icon"
+            style="--src: url({asset('/icons/itf.svg')})"
           ></span>TWINSに出力</button
         >
         <button
@@ -1417,166 +1492,133 @@
         >
       </div>
 
-      <div id="import-tab" class:active={activeTab === "import"}>
-        <div id="control">
-          <label id="import-grades-button" class="button">
-            <img src={asset("/icons/import.svg")} width="15px" alt="import" />
-            <span>TWINSの成績データをインポート</span>
-            <input
-              type="file"
-              id="csv"
-              accept=".csv"
-              onchange={handleCsvUpload}
-            />
-          </label>
-          <div id="student-type-container" style="margin-bottom: 50px;">
-            <label
-              ><input
-                type="radio"
-                name="student-type"
-                bind:group={isNative}
-                value={true}
-              /> <span>1年生からこの学類に所属している</span></label
-            ><br />
-            <label
-              ><input
-                type="radio"
-                name="student-type"
-                bind:group={isNative}
-                value={false}
-              /> <span>総合学域群からこの学類に移行した</span></label
-            >
-          </div>
-          {#if unclassifiedCourses.real.length + unclassifiedCourses.fake.length > 0}
-            <h2>卒業単位に含まれない授業</h2>
-            <table class="show-term">
-              <thead>
-                <tr class="course">
-                  <th class="id-name">科目</th>
-                  <th class="credit">単位</th>
-                  <th class="term">評価</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each unclassifiedCourses.real as c (c.id)}
+      {#if activeTab === "import"}
+        <div id="import-tab" class:active={activeTab === "import"}>
+          <div id="control">
+            <label id="import-grades-button" class="button">
+              <img src={asset("/icons/import.svg")} width="15px" alt="import" />
+              <span>TWINSの成績データをインポート</span>
+              <input
+                type="file"
+                id="csv"
+                accept=".csv"
+                onchange={handleCsvUpload}
+              />
+            </label>
+            <div id="student-type-container" style="margin-bottom: 50px;">
+              <label
+                ><input
+                  type="radio"
+                  name="student-type"
+                  bind:group={isNative}
+                  value={true}
+                /> <span>1年生からこの学類に所属している</span></label
+              ><br />
+              <label
+                ><input
+                  type="radio"
+                  name="student-type"
+                  bind:group={isNative}
+                  value={false}
+                /> <span>総合学域群からこの学類に移行した</span></label
+              >
+            </div>
+            {#if unclassifiedCourses.real.length + unclassifiedCourses.fake.length > 0}
+              <h2>卒業単位に含まれない授業</h2>
+              <table class="show-term">
+                <thead>
                   <tr class="course">
-                    <td class="id-name">
-                      <span>{c.id}</span><br />
-                      <a
-                        href={getSyllabusUrl(c.id, c.takenYear)}
-                        target="_blank">{c.name}</a
-                      >
-                    </td>
-                    <td class="credit">{c.credit ?? "-"}</td>
-                    <td class="term">{gradeDisplay(c.grade)}</td>
+                    <th class="id-name">科目</th>
+                    <th class="credit">単位</th>
+                    <th class="term">評価</th>
                   </tr>
-                {/each}
-                {#each unclassifiedCourses.fake as c (c.id)}
-                  <tr class="course">
-                    <td class="id-name">
-                      <span>（科目番号不明）</span><br />
-                      <span>{c.name}</span>
-                    </td>
-                    <td class="credit">{c.credit ?? "-"}</td>
-                    <td class="term">-</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-          <Callout kind="info">
-            成績データは、あきこの開発チームに閲覧されたり、外部に送信されたりすることはありません。
-          </Callout>
-          <Callout kind="warning">
-            成績データのファイルは、あきこにインポートする前にExcelやNumbersなどのアプリケーションで開いたり保存しないでください。
-            データの形式が壊れ、あきこに正しくインポートできなくなる場合があります。
-          </Callout>
-        </div>
-        <HowToImportFromTwins />
-      </div>
-
-      <div id="export-tab" class:active={activeTab === "export"}>
-        <div id="control">
-          <button
-            class="button"
-            onclick={exportMightTake}
-            disabled={exportForTwinsResult.kind !== "ok"}
-            style="margin-bottom: 20px"
-          >
-            <img src={asset("/icons/export.svg")} width="15px" alt="export" />
-            <span>取る授業一覧を出力</span>
-          </button>
-          {#if uiJizentouroku.length > 0}
-            <Callout kind="warning">
-              「取る授業」に事前登録対象の授業が存在します。
-              事前登録対象の授業はTWINSへのアップロードではなく、別途事前登録が必要です。
-            </Callout>
-            <h2 style="margin-top: 10px; margin-bottom: 0">
-              事前登録対象の授業
-            </h2>
-            <table>
-              <thead>
-                <tr class="course">
-                  <th class="id-name">科目</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each uiJizentouroku as course (course.id)}
-                  <tr class="course">
-                    <td class="id-name">
-                      <span>{course.id}</span><br />
-                      <a
-                        href={getSyllabusUrl(course.id, config.knownCourseYear)}
-                        target="_blank">{course.name}</a
-                      >
-                    </td>
-                    <td>
-                      {#if course.cellId !== undefined}
-                        {@const cellId = course.cellId}
-                        <button
-                          onclick={() => {
-                            selectedCellId = cellId;
-                            scrollCellIntoView(cellId);
-                            activeTimetableTerm = course.term;
-                            barsVisible = true;
-                            activeTab = "courses";
-                          }}>表示</button
-                        >
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-          {#if uiOverlaps.length > 0}
-            <Callout kind="warning">
-              「取る授業」に時間が被っている授業が存在します。
-              時間が被っている授業をTWINSに登録するすることはできないため、取る授業一覧をTWINSにアップロードするとエラーになります。
-            </Callout>
-            <h2 style="margin-top: 10px; margin-bottom: 0">
-              時間が被っている授業
-            </h2>
-            <table class="show-term">
-              <thead>
-                <tr class="course">
-                  <th class="term">時限</th>
-                  <th class="id-name">科目</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each uiOverlaps as group (group.slot)}
-                  {#each group.courses as course, i (course.id)}
+                </thead>
+                <tbody>
+                  {#each unclassifiedCourses.real as c (c.id)}
                     <tr class="course">
-                      {#if i === 0}
-                        <td
-                          class="term"
-                          rowspan={group.courses.length}
-                          style="white-space: nowrap">{group.slot}</td
+                      <td class="id-name">
+                        <span>{c.id}</span><br />
+                        <a
+                          href={getSyllabusUrl(c.id, c.takenYear)}
+                          target="_blank">{c.name}</a
                         >
-                      {/if}
+                      </td>
+                      <td class="credit">{c.credit ?? "-"}</td>
+                      <td class="term">{gradeDisplay(c.grade)}</td>
+                    </tr>
+                  {/each}
+                  {#each unclassifiedCourses.fake as c (c.id)}
+                    <tr class="course">
+                      <td class="id-name">
+                        <span>（科目番号不明）</span><br />
+                        <span>{c.name}</span>
+                      </td>
+                      <td class="credit">{c.credit ?? "-"}</td>
+                      <td class="term">-</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+            <Callout kind="info">
+              取り込んだ成績データは、この学生IDの履修データとしてサーバーに自動保存されます。
+            </Callout>
+            <Callout kind="warning">
+              成績データのファイルは、あきこにインポートする前にExcelやNumbersなどのアプリケーションで開いたり保存しないでください。
+              データの形式が壊れ、あきこに正しくインポートできなくなる場合があります。
+            </Callout>
+          </div>
+          <HowToImportFromTwins />
+        </div>
+      {/if}
+
+      {#if activeTab === "export"}
+        <div id="export-tab" class:active={activeTab === "export"}>
+          <div id="control">
+            <label class="export-year">
+              出力する年度
+              <select bind:value={timetableYear}>
+                {#each planYearOptions as year (year)}
+                  <option value={year}>{year}年度</option>
+                {/each}
+              </select>
+            </label>
+            {#if timetableYear !== config.knownCourseYear}
+              <Callout kind="warning">
+                授業情報は{config.knownCourseYear}年度版です。{timetableYear}年度の開講状況はTWINSで確認してください。
+              </Callout>
+            {/if}
+            <button
+              class="button"
+              onclick={exportMightTake}
+              disabled={exportForTwinsResult.kind !== "ok" ||
+                exportForTwinsResult.toExport.length === 0}
+              style="margin-bottom: 20px"
+            >
+              <img src={asset("/icons/export.svg")} width="15px" alt="export" />
+              <span>取る授業一覧を出力</span>
+            </button>
+            {#if exportForTwinsResult.kind === "ok" && exportForTwinsResult.toExport.length === 0}
+              <p>{timetableYear}年度に出力する授業はありません。</p>
+            {/if}
+            {#if uiJizentouroku.length > 0}
+              <Callout kind="warning">
+                「取る授業」に事前登録対象の授業が存在します。
+                事前登録対象の授業はTWINSへのアップロードではなく、別途事前登録が必要です。
+              </Callout>
+              <h2 style="margin-top: 10px; margin-bottom: 0">
+                事前登録対象の授業
+              </h2>
+              <table>
+                <thead>
+                  <tr class="course">
+                    <th class="id-name">科目</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each uiJizentouroku as course (course.id)}
+                    <tr class="course">
                       <td class="id-name">
                         <span>{course.id}</span><br />
                         <a
@@ -1592,282 +1634,389 @@
                           {@const cellId = course.cellId}
                           <button
                             onclick={() => {
-                              selectedCellId = cellId;
-                              scrollCellIntoView(cellId);
-                              activeTimetableTerm = group.term;
-                              barsVisible = true;
-                              activeTab = "courses";
+                              activeTimetableTerm = course.term;
+                              focusCell(cellId);
                             }}>表示</button
                           >
                         {/if}
                       </td>
                     </tr>
                   {/each}
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-        </div>
-        <HowToExportForTwins />
-      </div>
-
-      <div id="settings-tab" class:active={activeTab === "settings"}>
-        <h2>データの保存</h2>
-        <p>学生ID：{studentSession.studentId}</p>
-        <p>変更はサーバーに自動保存されます。</p>
-        <button class="button" onclick={downloadData}
-          >バックアップファイルを保存</button
-        >
-        <label
-          >バックアップから復元 <input
-            type="file"
-            accept=".json,application/json"
-            onchange={importData}
-          /></label
-        >
-        <p role="status">{storageMessage}</p>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={showNonAvailable} />
-          <span>今年度開講しない授業を表示する</span>
-        </label>
-        <label class="settings-row">
-          <input type="checkbox" bind:checked={timetableShowTaken} />
-          <span>時間割に単位取得済みの授業を表示する</span>
-        </label>
-        <label class="settings-row">
-          <span>時間割の年度</span>
-          <input type="number" bind:value={timetableYear} />
-        </label>
-        <div id="control">
-          <button id="reset" class="button" onclick={() => reset()}>
-            <img src={asset("/icons/trash.svg")} width="15px" alt="reset" />
-            <span>リセット</span>
-          </button>
-        </div>
-      </div>
-
-      <div id="courses-tab" class:active={activeTab === "courses"}>
-        <div
-          bind:this={leftBarEl}
-          id="left-bar"
-          ondragover={(e) => {
-            e.preventDefault();
-            if (e.dataTransfer !== null) e.dataTransfer.dropEffect = "move";
-          }}
-          ondrop={(e) => handleDrop(e, "wont-take")}
-        >
-          <div id="filter-bar">
-            <div id="filter-bar-row">
-              <search>
-                <input
-                  type="text"
-                  placeholder="科目番号・科目名・対象者（備考）"
-                  bind:value={wontTakeFilters.courseIdOrName}
-                />
-              </search>
-              <select
-                value={wontTakeFilters.credit ?? ""}
-                class:placeholder={wontTakeFilters.credit === undefined}
-                onchange={(e) => {
-                  const v = e.currentTarget.value;
-                  wontTakeFilters.credit = v === "" ? undefined : Number(v);
-                }}
-              >
-                <option value="">全単位</option>
-                {#each availableCredits as v (v)}
-                  <option value={v}>{v}単位</option>
-                {/each}
-              </select>
-              <select
-                value={wontTakeFilters.expects ?? ""}
-                class:placeholder={wontTakeFilters.expects === undefined}
-                onchange={(e) => {
-                  const v = e.currentTarget.value;
-                  wontTakeFilters.expects = v === "" ? undefined : Number(v);
-                }}
-              >
-                <option value="">全年次</option>
-                {#each availableExpects as v (v)}
-                  <option value={v}>{v}年次</option>
-                {/each}
-              </select>
-            </div>
-            <div id="filter-bar-slot-row">
-              <select
-                value={wontTakeFilters.term ?? ""}
-                class:placeholder={wontTakeFilters.term === undefined}
-                onchange={(e) => {
-                  const v = e.currentTarget.value;
-                  wontTakeFilters.term = v === "" ? undefined : (v as Term);
-                }}
-              >
-                <option value="">全学期</option>
-                {#each availableTermGroups as group (group.label)}
-                  <optgroup label={group.label}>
-                    {#each group.terms as t (t)}
-                      <option value={t}>{termToString(t)}</option>
+                </tbody>
+              </table>
+            {/if}
+            {#if uiOverlaps.length > 0}
+              <Callout kind="warning">
+                「取る授業」に時間が被っている授業が存在します。
+                時間が被っている授業をTWINSに登録するすることはできないため、取る授業一覧をTWINSにアップロードするとエラーになります。
+              </Callout>
+              <h2 style="margin-top: 10px; margin-bottom: 0">
+                時間が被っている授業
+              </h2>
+              <table class="show-term">
+                <thead>
+                  <tr class="course">
+                    <th class="term">時限</th>
+                    <th class="id-name">科目</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each uiOverlaps as group (group.slot)}
+                    {#each group.courses as course, i (course.id)}
+                      <tr class="course">
+                        {#if i === 0}
+                          <td
+                            class="term"
+                            rowspan={group.courses.length}
+                            style="white-space: nowrap">{group.slot}</td
+                          >
+                        {/if}
+                        <td class="id-name">
+                          <span>{course.id}</span><br />
+                          <a
+                            href={getSyllabusUrl(
+                              course.id,
+                              config.knownCourseYear,
+                            )}
+                            target="_blank">{course.name}</a
+                          >
+                        </td>
+                        <td>
+                          {#if course.cellId !== undefined}
+                            {@const cellId = course.cellId}
+                            <button
+                              onclick={() => {
+                                activeTimetableTerm = group.term;
+                                focusCell(cellId);
+                              }}>表示</button
+                            >
+                          {/if}
+                        </td>
+                      </tr>
                     {/each}
-                  </optgroup>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+          <HowToExportForTwins />
+        </div>
+      {/if}
+
+      {#if activeTab === "settings"}
+        <div id="settings-tab" class:active={activeTab === "settings"}>
+          <h2>データの保存</h2>
+          <p>学生ID：{studentSession.studentId}</p>
+          <p>変更はサーバーに自動保存されます。</p>
+          <div class="backup-actions">
+            <button type="button" onclick={downloadData}
+              >バックアップを保存</button
+            >
+            <label class="backup-restore">
+              バックアップから復元
+              <input
+                type="file"
+                accept=".json,application/json"
+                onchange={importData}
+              />
+            </label>
+          </div>
+          <p class="backup-hint">
+            復元するJSONファイルを選ぶと、現在のデータを置き換えるか確認します。
+          </p>
+          <p role="status">{storageMessage}</p>
+          <label class="settings-row">
+            <input type="checkbox" bind:checked={showNonAvailable} />
+            <span>今年度開講しない授業を表示する</span>
+          </label>
+          <label class="settings-row">
+            <input type="checkbox" bind:checked={timetableShowTaken} />
+            <span>時間割に単位取得済みの授業を表示する</span>
+          </label>
+          <label class="settings-row">
+            <span>表示・出力する年度</span>
+            <select bind:value={timetableYear}>
+              {#each planYearOptions as year (year)}
+                <option value={year}>{year}年度</option>
+              {/each}
+            </select>
+          </label>
+          <div id="control">
+            <button id="reset" class="button" onclick={() => reset()}>
+              <img src={asset("/icons/trash.svg")} width="15px" alt="reset" />
+              <span>リセット</span>
+            </button>
+          </div>
+        </div>
+      {/if}
+
+      {#if activeTab === "courses"}
+        <div id="courses-tab" class:active={activeTab === "courses"}>
+          <div id="plan-year-toolbar">
+            <label>
+              計画する年度
+              <select bind:value={timetableYear}>
+                {#each planYearOptions as year (year)}
+                  <option value={year}>{year}年度</option>
                 {/each}
               </select>
-              <div id="dow-chips" role="group" aria-label="曜日で絞り込む">
-                {#each DOWS as d (d)}
-                  {@const active = wontTakeFilters.dows.includes(d)}
-                  <button
-                    type="button"
-                    class="dow-chip"
-                    class:active
-                    aria-pressed={active}
-                    disabled={!availableDows.includes(d)}
-                    onclick={() => {
-                      wontTakeFilters.dows = active
-                        ? wontTakeFilters.dows.filter((x) => x !== d)
-                        : [...wontTakeFilters.dows, d];
-                    }}>{dowToString(d)}</button
-                  >
-                {/each}
+            </label>
+            <span>授業を選ぶ → 年度別に予定を立てる → TWINSへ出力</span>
+            {#if timetableYear !== config.knownCourseYear}
+              <span class="plan-year-note"
+                >授業・時限は{config.knownCourseYear}年度版を参考表示</span
+              >
+            {/if}
+          </div>
+          <div
+            bind:this={leftBarEl}
+            id="left-bar"
+            ondragover={(e) => {
+              e.preventDefault();
+              if (e.dataTransfer !== null) e.dataTransfer.dropEffect = "move";
+            }}
+            ondrop={(e) => handleDrop(e, "wont-take")}
+          >
+            <div id="filter-bar">
+              <div id="filter-bar-row">
+                <search>
+                  <input
+                    type="text"
+                    placeholder="科目番号・科目名・対象者（備考）"
+                    bind:value={wontTakeFilters.courseIdOrName}
+                  />
+                </search>
+                <select
+                  value={wontTakeFilters.credit ?? ""}
+                  class:placeholder={wontTakeFilters.credit === undefined}
+                  onchange={(e) => {
+                    const v = e.currentTarget.value;
+                    wontTakeFilters.credit = v === "" ? undefined : Number(v);
+                  }}
+                >
+                  <option value="">全単位</option>
+                  {#each availableCredits as v (v)}
+                    <option value={v}>{v}単位</option>
+                  {/each}
+                </select>
+                <select
+                  value={wontTakeFilters.expects ?? ""}
+                  class:placeholder={wontTakeFilters.expects === undefined}
+                  onchange={(e) => {
+                    const v = e.currentTarget.value;
+                    wontTakeFilters.expects = v === "" ? undefined : Number(v);
+                  }}
+                >
+                  <option value="">全年次</option>
+                  {#each availableExpects as v (v)}
+                    <option value={v}>{v}年次</option>
+                  {/each}
+                </select>
+              </div>
+              <div id="filter-bar-slot-row">
+                <select
+                  value={wontTakeFilters.term ?? ""}
+                  class:placeholder={wontTakeFilters.term === undefined}
+                  onchange={(e) => {
+                    const v = e.currentTarget.value;
+                    wontTakeFilters.term = v === "" ? undefined : (v as Term);
+                  }}
+                >
+                  <option value="">全学期</option>
+                  {#each availableTermGroups as group (group.label)}
+                    <optgroup label={group.label}>
+                      {#each group.terms as t (t)}
+                        <option value={t}>{termToString(t)}</option>
+                      {/each}
+                    </optgroup>
+                  {/each}
+                </select>
+                <div id="dow-chips" role="group" aria-label="曜日で絞り込む">
+                  {#each DOWS as d (d)}
+                    {@const active = wontTakeFilters.dows.includes(d)}
+                    <button
+                      type="button"
+                      class="dow-chip"
+                      class:active
+                      aria-pressed={active}
+                      disabled={!availableDows.includes(d)}
+                      onclick={() => {
+                        wontTakeFilters.dows = active
+                          ? wontTakeFilters.dows.filter((x) => x !== d)
+                          : [...wontTakeFilters.dows, d];
+                      }}>{dowToString(d)}</button
+                    >
+                  {/each}
+                </div>
+              </div>
+              <div id="filter-bar-checkboxes">
+                <label class="filter-checkbox">
+                  <input
+                    type="checkbox"
+                    bind:checked={wontTakeFilters.onlyMatchingTarget}
+                  />
+                  学類・入学年度に合う授業のみ
+                </label>
+                <label class="filter-checkbox">
+                  <input
+                    type="checkbox"
+                    bind:checked={wontTakeFilters.onlyUnoccupied}
+                  />
+                  空きコマのみ表示
+                </label>
+                <label class="filter-checkbox">
+                  <input type="checkbox" bind:checked={showCourseRemark} />
+                  備考を表示
+                </label>
               </div>
             </div>
-            <div id="filter-bar-checkboxes">
-              <label class="filter-checkbox">
-                <input
-                  type="checkbox"
-                  bind:checked={wontTakeFilters.onlyMatchingTarget}
-                />
-                学類・入学年度に合う授業のみ
-              </label>
-              <label class="filter-checkbox">
-                <input
-                  type="checkbox"
-                  bind:checked={wontTakeFilters.onlyUnoccupied}
-                />
-                空きコマのみ表示
-              </label>
-              <label class="filter-checkbox">
-                <input type="checkbox" bind:checked={showCourseRemark} />
-                備考を表示
-              </label>
-            </div>
-          </div>
-          <div id="left-bar-scroll" bind:this={leftBarScrollEl}>
-            <div class="section">
-              <h2>
-                {selectedCellId ? "当てはまる授業" : "全ての授業"}
-                ({filteredCourseLists.wontTake.length}/{courseLists.wontTake
-                  .length})
-              </h2>
-              {@render courseTable(
-                wontTakeSliced,
-                courseLists.wontTake.length === 0
-                  ? "no-courses"
-                  : "contains-courses",
-                true,
-                true,
-                "wont-take",
-              )}
-              <div bind:this={wontTakeSentinelEl}></div>
-            </div>
-          </div>
-          {#if selectedCellRemark}
-            <div id="cell-remark">
-              <h2>備考</h2>
-              <p style="white-space: pre-line">{selectedCellRemark}</p>
-            </div>
-          {/if}
-        </div>
-
-        <div
-          bind:this={rightBarEl}
-          id="right-bar"
-          ondragover={(e) => {
-            e.preventDefault();
-            if (e.dataTransfer !== null) e.dataTransfer.dropEffect = "move";
-          }}
-          ondrop={(e) => handleDrop(e, "might-take")}
-        >
-          <Timetable
-            year={timetableYear}
-            bind:activeTerm={activeTimetableTerm}
-            {mightTakeCourseIds}
-            {takenCourseIds}
-            fakeCourses={classifiedFakeCourses}
-            showTaken={timetableShowTaken}
-            {knownCoursesMap}
-            {realCoursesMap}
-            onBarClick={(courseId: CourseId) => {
-              const cellId = svelteAkiko.getCellId(courseId);
-              if (cellId !== undefined) {
-                selectedCellId = cellId;
-                scrollCellIntoView(cellId);
-                barsVisible = true;
-                activeTab = "courses";
-              }
-            }}
-            onBarDragStart={(e: DragEvent, courseId: CourseId) =>
-              handleDragStart(e, courseId, "might-take")}
-            onBarDragEnd={handleDragEnd}
-          />
-          <div id="right-bar-scroll">
-            {#if selectedCellStats}
-              {@const display = cellCreditStatsDisplay(selectedCellStats)}
+            <div id="left-bar-scroll" bind:this={leftBarScrollEl}>
               <div class="section">
-                <h2>単位数</h2>
-                <p>
-                  選択されたマスの単位：{display.brief}
-                  {#if display.warning}<br />⚠️ {display.warning}{/if}
-                </p>
+                <h2>
+                  {selectedCellId ? "当てはまる授業" : "全ての授業"}
+                  ({filteredCourseLists.wontTake.length}/{courseLists.wontTake
+                    .length})
+                </h2>
+                {@render courseTable(
+                  wontTakeSliced,
+                  courseLists.wontTake.length === 0
+                    ? "no-courses"
+                    : "contains-courses",
+                  true,
+                  true,
+                  "wont-take",
+                )}
+                <div bind:this={wontTakeSentinelEl}></div>
+              </div>
+            </div>
+            {#if selectedCellRemark}
+              <div id="cell-remark">
+                <h2>備考</h2>
+                <p style="white-space: pre-line">{selectedCellRemark}</p>
               </div>
             {/if}
-            <div class="section">
-              <div class="list-heading">
-                <h2>取る授業</h2>
-                {#if selectedCellStats}
-                  <span class="credit-total">
-                    {selectedCellStats.rawMightTake}単位
-                  </span>
-                {/if}
+          </div>
+
+          <div
+            bind:this={rightBarEl}
+            id="right-bar"
+            ondragover={(e) => {
+              e.preventDefault();
+              if (e.dataTransfer !== null) e.dataTransfer.dropEffect = "move";
+            }}
+            ondrop={(e) => handleDrop(e, "might-take")}
+          >
+            <Timetable
+              year={timetableYear}
+              bind:activeTerm={activeTimetableTerm}
+              mightTakeCourseIds={plannedForTimetable}
+              {takenCourseIds}
+              fakeCourses={classifiedFakeCourses}
+              showTaken={timetableShowTaken}
+              {knownCoursesMap}
+              {realCoursesMap}
+              onBarClick={(courseId: CourseId) => {
+                const cellId = svelteAkiko.getCellId(courseId);
+                if (cellId !== undefined) {
+                  focusCell(cellId);
+                }
+              }}
+              onBarDragStart={(e: DragEvent, courseId: CourseId) =>
+                handleDragStart(e, courseId, "might-take")}
+              onBarDragEnd={handleDragEnd}
+            />
+            <div id="right-bar-scroll">
+              <div id="credit-overview" class="section">
+                <h2>卒業単位の合計</h2>
+                <div class="credit-overview-grid">
+                  <p>
+                    <span>必修</span>
+                    <strong
+                      >{creditStats.compulsory.effectiveTaken +
+                        creditStats.compulsory.effectiveMightTake}</strong
+                    >
+                    / {creditStats.compulsory.min}単位
+                  </p>
+                  <p>
+                    <span>選択</span>
+                    <strong
+                      >{creditStats.elective.effectiveTaken +
+                        creditStats.elective.effectiveMightTake}</strong
+                    >
+                    / {creditStats.elective.min}単位
+                  </p>
+                </div>
+                <p class="credit-overview-total">
+                  必修＋選択：<strong
+                    >{creditStats.compulsory.effectiveTotal +
+                      creditStats.elective.effectiveTotal}</strong
+                  >
+                  / {creditStats.compulsory.min + creditStats.elective.min}単位
+                </p>
+                <small
+                  >取得済みと全年度の予定を合算（卒業要件に算入できる単位）</small
+                >
               </div>
-              {@render courseTable(
-                filteredCourseLists.mightTake,
-                filteredCourseLists.mightTake.length === 0
-                  ? "no-courses"
-                  : "contains-courses",
-                true,
-                false,
-                "might-take",
-              )}
-            </div>
-            <div class="section">
-              <div class="list-heading">
-                <h2>単位取得済みの授業</h2>
-                {#if selectedCellStats}
-                  <span class="credit-total">
-                    {selectedCellStats.rawTaken}単位
-                  </span>
-                {/if}
-              </div>
-              {@render courseTable(
-                filteredCourseLists.taken,
-                filteredCourseLists.taken.length === 0
-                  ? "no-courses"
-                  : "contains-courses",
-                false,
-                false,
-                undefined,
-              )}
-            </div>
-            {#if filteredCourseLists.fake.length > 0}
+              {#if selectedCellStats}
+                {@const display = cellCreditStatsDisplay(selectedCellStats)}
+                <div class="section">
+                  <h2>単位数</h2>
+                  <p>
+                    選択されたマスの単位：{display.brief}
+                    {#if display.warning}<br />⚠️ {display.warning}{/if}
+                  </p>
+                </div>
+              {/if}
               <div class="section">
                 <div class="list-heading">
-                  <h2>認可された授業</h2>
-                  <span class="credit-total">{fakeCreditTotal}単位</span>
+                  <h2>取る授業（年度別）</h2>
+                  <span class="credit-total">
+                    {timetableYear}年度：{plannedYearCredits}単位
+                  </span>
                 </div>
-                {@render fakeCourseTable(filteredCourseLists.fake)}
+                {@render courseTable(
+                  filteredCourseLists.mightTake,
+                  filteredCourseLists.mightTake.length === 0
+                    ? "no-courses"
+                    : "contains-courses",
+                  true,
+                  false,
+                  "might-take",
+                )}
               </div>
-            {/if}
+              <div class="section">
+                <div class="list-heading">
+                  <h2>単位取得済みの授業</h2>
+                  {#if selectedCellStats}
+                    <span class="credit-total">
+                      {selectedCellStats.rawTaken}単位
+                    </span>
+                  {/if}
+                </div>
+                {@render courseTable(
+                  filteredCourseLists.taken,
+                  filteredCourseLists.taken.length === 0
+                    ? "no-courses"
+                    : "contains-courses",
+                  false,
+                  false,
+                  undefined,
+                )}
+              </div>
+              {#if filteredCourseLists.fake.length > 0}
+                <div class="section">
+                  <div class="list-heading">
+                    <h2>認可された授業</h2>
+                    <span class="credit-total">{fakeCreditTotal}単位</span>
+                  </div>
+                  {@render fakeCourseTable(filteredCourseLists.fake)}
+                </div>
+              {/if}
+            </div>
           </div>
         </div>
-      </div>
+      {/if}
     </div>
   </main>
 
@@ -1904,29 +2053,6 @@
       onpointerup={onTimetableResizePointerUp}
     ></div>
   {/if}
-
-  {#if mobileUnsupported && !mobileUnsupportedDismissed}
-    <div id="mobile-unsupported" role="dialog" aria-modal="true">
-      <div class="mobile-unsupported-dialog">
-        <img src={asset("/images/akiko.png")} alt="あきこ" />
-        <span>あきこ</span>
-        <span>ごめんなさいね〜</span>
-      </div>
-      <p>
-        現在あきこはスマホの小さい画面やタッチ操作に対応しておらず、パソコンで開いていただく必要があります。
-        私たちは主に単位チェックの正確性を優先して開発を進めており、スマホ対応を優先的に進める目処は立っていません。
-        お手数をおかけして申し訳ございません。
-      </p>
-      <div class="mobile-unsupported-actions">
-        <button
-          type="button"
-          onclick={() => (mobileUnsupportedDismissed = true)}
-        >
-          このまま使う
-        </button>
-      </div>
-    </div>
-  {/if}
 {/if}
 
 <style lang="scss">
@@ -1945,72 +2071,8 @@
     font-size: 0.85rem;
   }
 
-  #mobile-unsupported {
-    position: fixed;
-    inset: 0;
-    z-index: 9999;
-    background-color: white;
-
-    & > p {
-      margin: 30px;
-    }
-
-    & > .mobile-unsupported-actions {
-      margin: 0 30px 30px;
-      display: flex;
-      justify-content: center;
-
-      & > button {
-        font-size: inherit;
-        padding: 10px 15px;
-        border: 1px solid #ccc;
-        border-radius: 10px;
-        background-color: #f8f8f8;
-        cursor: pointer;
-
-        &:hover {
-          background-color: #eee;
-        }
-      }
-    }
-
-    & > .mobile-unsupported-dialog {
-      width: 80%;
-      margin: 20px auto;
-      margin-bottom: 40px;
-
-      display: grid;
-      $icon-size: 70px;
-      grid-template-columns: $icon-size auto;
-      grid-template-rows: $icon-size auto;
-      padding: 10px 20px;
-
-      --h: 350;
-      background-color: oklch(98% 4% var(--h));
-      border: 1px solid oklch(92% 10% var(--h));
-      border-radius: 20px;
-
-      & > img {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-        background-color: hsl(0, 0%, 98%);
-        border: 1px solid oklch(92% 10% var(--h));
-        border-radius: 50%;
-      }
-
-      & > span:first-of-type {
-        place-self: center;
-        margin-top: 5px;
-      }
-
-      & > span:nth-of-type(2) {
-        grid-column: 2/3;
-        grid-row: 1/3;
-        align-self: center;
-        margin-left: 30px;
-      }
-    }
+  #view-switcher {
+    display: none;
   }
 
   $color-progress-taken: rgb(51, 204, 51);
@@ -2049,6 +2111,8 @@
     grid-column: 1/2;
     display: grid;
     grid-template-rows: 1fr 85px;
+    min-width: 0;
+    min-height: 0;
   }
 
   #requirements {
@@ -2061,9 +2125,10 @@
     position: absolute;
     left: 0;
     top: 0;
-    text-wrap: nowrap;
+    box-sizing: border-box;
+    width: 100%;
     display: grid;
-    grid-template-columns: auto auto;
+    grid-template-columns: 80px minmax(0, 1fr);
     grid-template-rows: auto auto;
     align-items: center;
     background-color: oklch(98% 4% 350);
@@ -2072,6 +2137,11 @@
     border-color: oklch(92% 10% 350);
     border-bottom-right-radius: 10px;
     padding: 10px 20px;
+
+    & > span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
 
     & > .akiko {
       grid-column: 1/2;
@@ -2098,6 +2168,7 @@
       padding: 0;
       display: flex;
       gap: 20px;
+      flex-wrap: wrap;
     }
 
     & > span > strong {
@@ -2108,9 +2179,10 @@
   #sidebar {
     grid-column: 2/3;
     display: grid;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     border-left: 1px solid black;
     overflow: hidden;
+    min-width: 0;
 
     & h2 {
       margin-top: 0;
@@ -2126,6 +2198,24 @@
     gap: 10px;
     padding: 10px;
     border-bottom: 1px solid black;
+
+    & > button > .step-number {
+      display: grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      flex: none;
+      border-radius: 50%;
+      background: #edf0ff;
+      color: #3443a2;
+      font-size: 0.8em;
+      font-weight: bold;
+    }
+
+    & > button.active > .step-number {
+      background: white;
+      color: #3443a2;
+    }
 
     & > .workflow-arrow {
       display: flex;
@@ -2195,9 +2285,49 @@
     }
   }
 
+  .backup-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+
+    & > button,
+    & > label {
+      position: relative;
+      flex: 1;
+      min-width: 170px;
+      box-sizing: border-box;
+      padding: 10px;
+      font: inherit;
+      text-align: center;
+      color: #3443a2;
+      background: #eef1ff;
+      border: 1px solid #bbc4f5;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    & > label:focus-within {
+      outline: 2px solid #3443a2;
+      outline-offset: 2px;
+    }
+
+    & input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+    }
+  }
+
+  .backup-hint {
+    color: #555;
+    font-size: 0.9em;
+  }
+
   #courses-tab {
     display: none;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     overflow: hidden;
 
     &.active {
@@ -2205,11 +2335,57 @@
     }
   }
 
+  #plan-year-toolbar {
+    grid-column: 1/-1;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    padding: 8px 12px;
+    background: #f7f8ff;
+    border-bottom: 1px solid #d9def6;
+
+    & > label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: bold;
+    }
+
+    & > span {
+      color: #555;
+      font-size: 0.9em;
+    }
+
+    & > .plan-year-note {
+      color: #885700;
+    }
+  }
+
+  #plan-year-toolbar select,
+  .export-year select,
+  .settings-row select,
+  .course-plan-actions select {
+    font: inherit;
+    padding: 4px 6px;
+    background: white;
+    border: 1px solid #aaa;
+    border-radius: 6px;
+  }
+
+  .export-year {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
   #left-bar {
     display: grid;
     grid-template-rows: auto 1fr auto;
     border-right: 1px dashed black;
     overflow: hidden;
+    min-width: 0;
+    min-height: 0;
   }
 
   #left-bar-scroll {
@@ -2298,7 +2474,8 @@
 
   #filter-bar-checkboxes {
     display: flex;
-    gap: 15px;
+    flex-wrap: wrap;
+    gap: 6px 15px;
   }
 
   .filter-checkbox {
@@ -2310,8 +2487,47 @@
 
   #right-bar {
     display: grid;
-    grid-template-rows: var(--timetable-height) 1fr;
+    grid-template-rows: var(--timetable-height) minmax(0, 1fr);
     overflow: hidden;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  #credit-overview {
+    padding: 12px;
+    background: #f7f8ff;
+    border: 1px solid #d9def6;
+    border-radius: 10px;
+
+    & > small {
+      color: #555;
+    }
+  }
+
+  .credit-overview-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 8px 0;
+
+    & > p {
+      padding: 8px;
+      background: white;
+      border-radius: 8px;
+    }
+
+    & span {
+      display: block;
+    }
+
+    & strong {
+      font-size: 1.5em;
+    }
+  }
+
+  .credit-overview-total {
+    margin: 0 0 8px;
+    font-weight: bold;
   }
 
   #right-bar-scroll {
@@ -2423,6 +2639,33 @@
     font-size: var(--fs-xs);
     color: oklch(0.4 0.15 250);
     text-decoration: underline;
+  }
+
+  .course-plan-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+
+    & > label {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px;
+      font-size: var(--fs-sm);
+    }
+
+    & > button {
+      padding: 3px 6px;
+      font: inherit;
+      font-size: var(--fs-sm);
+      color: #3443a2;
+      background: #eef1ff;
+      border: 1px solid #bbc4f5;
+      border-radius: 5px;
+      cursor: pointer;
+    }
   }
 
   .course-remark td {
@@ -2668,15 +2911,6 @@
     background-color: hsl(0, 0%, 97%);
     border-radius: 10px;
     margin-bottom: 5px;
-
-    & input[type="number"] {
-      width: 70px;
-      font-family: inherit;
-      font-size: inherit;
-      padding: 5px;
-      border: 1px solid #ccc;
-      border-radius: 5px;
-    }
   }
 
   #drop-guide {
@@ -2691,7 +2925,7 @@
 
   #zoom-control {
     position: absolute;
-    bottom: 5px;
+    bottom: 60px;
     left: 5px;
     display: flex;
     align-items: center;
@@ -2704,6 +2938,172 @@
 
     & > input[type="range"] {
       width: 100px;
+    }
+  }
+
+  @media (max-width: 1350px) {
+    main,
+    main.bars-hidden {
+      box-sizing: border-box;
+      padding-bottom: 48px;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+
+    .save-status {
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 5px 10px;
+      text-align: center;
+      border-radius: 0;
+    }
+
+    #view-switcher {
+      grid-column: 1;
+      grid-row: 1;
+      display: flex;
+      gap: 6px;
+      padding: 6px;
+      background: #f7f8ff;
+      border-bottom: 1px solid #d9def6;
+
+      & > button {
+        flex: 1;
+        padding: 6px;
+        font: inherit;
+        background: white;
+        border: 1px solid #bbc4f5;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+
+      & > button.active {
+        color: white;
+        background: #728cff;
+      }
+    }
+
+    #table-view,
+    #sidebar {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    main:not(.bars-hidden) > #table-view {
+      display: none;
+    }
+
+    main.bars-hidden > #table-view {
+      display: grid;
+    }
+
+    #sidebar {
+      border-left: 0;
+    }
+
+    #bars-toggle,
+    #sidebar-resize-handle {
+      display: none;
+    }
+
+    #timetable-resize-handle {
+      left: 50%;
+    }
+  }
+
+  @media (max-width: 700px) {
+    #tab-header {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 4px;
+      padding: 6px;
+
+      & > .workflow-arrow {
+        display: none;
+      }
+
+      & > button {
+        min-width: 0;
+        width: 100%;
+        margin: 0;
+        padding: 5px 2px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        font-size: 0.78em;
+        line-height: 1.2;
+        text-align: center;
+      }
+    }
+
+    #courses-tab.active {
+      display: block;
+      overflow-y: auto;
+      padding-bottom: 50px;
+    }
+
+    #plan-year-toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    #left-bar,
+    #right-bar {
+      display: block;
+      overflow: visible;
+    }
+
+    #left-bar {
+      border-right: 0;
+      border-bottom: 1px solid #ccc;
+    }
+
+    #left-bar-scroll {
+      height: 45vh;
+      overflow-y: auto;
+    }
+
+    #right-bar :global(.timetable) {
+      height: 350px;
+    }
+
+    #right-bar-scroll {
+      max-height: 55vh;
+      overflow-y: auto;
+    }
+
+    #filter-bar-row {
+      flex-wrap: wrap;
+
+      & > search {
+        flex-basis: 100%;
+      }
+    }
+
+    #filter-bar-checkboxes {
+      flex-direction: column;
+    }
+
+    #title {
+      grid-template-columns: 52px minmax(0, 1fr);
+      padding: 8px;
+
+      & > .akiko {
+        width: 42px;
+        height: 42px;
+        margin-right: 10px;
+      }
+
+      & > nav {
+        gap: 4px 10px;
+      }
+    }
+
+    #timetable-resize-handle {
+      display: none;
     }
   }
 </style>

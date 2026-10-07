@@ -103,18 +103,20 @@ export class SvelteAkiko {
     return this.akiko.fakeCoursePositions;
   }
 
-  getOccupiedSlots(): OccupiedSlots {
+  getOccupiedSlots(selectedCourseIds?: ReadonlySet<CourseId>): OccupiedSlots {
     this.subscribe();
-    return akikoGetOccupiedSlots(this.akiko);
+    return akikoGetOccupiedSlots(this.akiko, selectedCourseIds);
   }
 
   isOccupied(occupied: OccupiedSlots, courseId: CourseId): boolean {
     return akikoIsOccupied(this.akiko, occupied, courseId);
   }
 
-  exportForTwins(): AkikoExportForTwinsResult {
+  exportForTwins(
+    selectedCourseIds?: ReadonlySet<CourseId>,
+  ): AkikoExportForTwinsResult {
     this.subscribe();
-    return akikoExportForTwins(this.akiko);
+    return akikoExportForTwins(this.akiko, selectedCourseIds);
   }
 
   moveCourse(

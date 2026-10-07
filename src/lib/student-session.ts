@@ -2,8 +2,8 @@ export const STUDENT_SESSION = Symbol("student-session");
 
 export type StudentSession = { readonly studentId: string };
 
-export function isStudentId(value: string): boolean {
-  return /^s[0-9]{7}$/.test(value);
+export function isStudentId(value: unknown): value is string {
+  return typeof value === "string" && /^s[0-9]{7}$/.test(value);
 }
 
 export function studentIdFromCookies(cookies: string): string | undefined {

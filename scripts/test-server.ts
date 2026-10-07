@@ -25,6 +25,7 @@ const child = spawn(
       TLS_CERT: "",
       TLS_KEY: "",
       PUBLIC_ORIGIN: "",
+      AUTH_MODE: "local",
     },
     stdio: ["ignore", "pipe", "inherit"],
   },
@@ -235,6 +236,8 @@ try {
         TLS_CERT: "",
         TLS_KEY: "",
         PUBLIC_ORIGIN: publicOrigin,
+        AUTH_MODE: "local",
+        NODE_ENV: "test",
       },
       stdio: ["ignore", "pipe", "inherit"],
     },
@@ -290,9 +293,7 @@ try {
     );
   } finally {
     if (configured.exitCode === null && configured.signalCode === null) {
-      const exited = once(configured, "exit");
       configured.kill();
-      await exited;
     }
   }
   console.log(
@@ -300,8 +301,6 @@ try {
   );
 } finally {
   clearTimeout(timeout);
-  const exited = once(child, "exit");
   child.kill();
-  await exited;
   await rm(dir, { recursive: true, force: true });
 }

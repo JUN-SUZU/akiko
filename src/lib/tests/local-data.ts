@@ -9,7 +9,7 @@ import {
   isCourseId,
 } from "$lib/akiko";
 import { createCreditRequirementsOrFail } from "$lib/app-setup";
-import { localDataFromJson } from "$lib/local-data";
+import { localDataFromJson, localDataToJson } from "$lib/local-data";
 import { assert } from "$lib/util";
 
 function courseId(s: string): CourseId {
@@ -130,6 +130,7 @@ function testV2Migration(): void {
   assert(!migrated.listKindOverrides.has(WIP));
   assert(migrated.realCourses.length === 1);
   assert(migrated.native);
+  assert(migrated.plannedYears.size === 0);
 }
 
 /** v3 はそのまま読める。保存した形に戻せる。 */
@@ -137,6 +138,7 @@ function testV3RoundTrip(): void {
   const v3 = JSON.stringify({
     version: 3,
     listKindOverrides: { [PLANNED]: "might-take", [WIP]: "wont-take" },
+    plannedYears: { [PLANNED]: 2027 },
     native: false,
     realCourses: [],
     fakeCourses: [],
@@ -146,7 +148,25 @@ function testV3RoundTrip(): void {
   assert(parsed !== undefined);
   assert(parsed.listKindOverrides.get(PLANNED) === "might-take");
   assert(parsed.listKindOverrides.get(WIP) === "wont-take");
+  assert(parsed.plannedYears.get(PLANNED) === 2027);
   assert(!parsed.native);
+  assert(
+    localDataFromJson(localDataToJson(parsed))?.plannedYears.get(PLANNED) ===
+      2027,
+  );
+  assert(
+    localDataFromJson(
+      JSON.stringify({
+        ...JSON.parse(v3),
+        plannedYears: { [PLANNED]: 2027.5 },
+      }),
+    ) === undefined,
+  );
+  assert(
+    localDataFromJson(
+      JSON.stringify({ ...JSON.parse(v3), plannedYears: { invalid: 2027 } }),
+    ) === undefined,
+  );
 }
 
 testListKindFromGrades();

@@ -7,6 +7,7 @@ import "./coins";
 import "./esys";
 import "./klis";
 import "./local-data";
+import "./year-planning";
 import "./course-target";
 import "./server-autosave";
 import "./mast";

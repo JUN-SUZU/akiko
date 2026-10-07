@@ -696,10 +696,14 @@ export function akikoGetUnclassifiedFakeCourses(akiko: Akiko): FakeCourse[] {
 
 export type OccupiedSlots = Nominal<Set<string>, "OccupiedSlots">;
 
-export function akikoGetOccupiedSlots(akiko: Akiko): OccupiedSlots {
+export function akikoGetOccupiedSlots(
+  akiko: Akiko,
+  selectedCourseIds?: ReadonlySet<CourseId>,
+): OccupiedSlots {
   const occupied = new Set<string>();
   for (const [courseId, listKind] of akiko.courseIdToListKind) {
     if (listKind !== "might-take") continue;
+    if (selectedCourseIds && !selectedCourseIds.has(courseId)) continue;
     const kc = akiko.knownCourses.get(courseId);
     if (kc === undefined) continue;
     for (const s of kc.slots) {
@@ -734,12 +738,16 @@ export type AkikoExportForTwinsResult =
   | { kind: "ok"; toExport: KnownCourse[]; jizentouroku: KnownCourse[] }
   | { kind: "err"; overlaps: Overlap[]; jizentouroku: KnownCourse[] };
 
-export function akikoExportForTwins(akiko: Akiko): AkikoExportForTwinsResult {
+export function akikoExportForTwins(
+  akiko: Akiko,
+  selectedCourseIds?: ReadonlySet<CourseId>,
+): AkikoExportForTwinsResult {
   const candidates: KnownCourse[] = [];
   for (const [id, listKind] of akiko.courseIdToListKind) {
     const kc = akiko.knownCourses.get(id);
     if (
       listKind === "might-take" &&
+      (!selectedCourseIds || selectedCourseIds.has(id)) &&
       kc !== undefined &&
       akiko.realCourses.get(id)?.grade !== "wip"
     )

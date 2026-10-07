@@ -36,6 +36,7 @@ export type LocalDataV2 = {
 export type LocalDataV3 = {
   version: 3;
   listKindOverrides: ListKindOverrides;
+  plannedYears: Map<CourseId, number>;
   realCourses: RealCourse[];
   fakeCourses: FakeCourse[];
   native: boolean;
@@ -124,6 +125,7 @@ function localDataV2ToV3(v2: LocalDataV2): LocalDataV3 {
   return {
     version: 3,
     listKindOverrides,
+    plannedYears: new Map(),
     realCourses: v2.realCourses,
     fakeCourses: v2.fakeCourses,
     native: v2.native,
@@ -189,6 +191,9 @@ const localDataV3Parser = z.object({
     z.string(),
     z.union([z.literal("might-take"), z.literal("wont-take")]),
   ),
+  plannedYears: z
+    .record(z.string(), z.number().int().min(1900).max(2100))
+    .optional(),
   native: z.boolean(),
   realCourses: realCoursesParser,
   fakeCourses: fakeCoursesParser,
@@ -275,6 +280,12 @@ function localDataV3Parse(x: unknown): LocalDataV3 | undefined {
     listKindOverrides.set(id, override);
   }
 
+  const plannedYears = new Map<CourseId, number>();
+  for (const [id, year] of Object.entries(result.data.plannedYears ?? {})) {
+    if (!isCourseId(id)) return undefined;
+    plannedYears.set(id, year);
+  }
+
   const realCourses = parseRealCourses(result.data.realCourses);
   const fakeCourses = parseFakeCourses(result.data.fakeCourses);
   if (realCourses === undefined || fakeCourses === undefined) {
@@ -284,6 +295,7 @@ function localDataV3Parse(x: unknown): LocalDataV3 | undefined {
   return {
     version: result.data.version,
     listKindOverrides,
+    plannedYears,
     native: result.data.native,
     realCourses,
     fakeCourses,
@@ -312,13 +324,17 @@ export function localDataFromJson(json: string): LocalDataV3 | undefined {
 export function localDataToJson(d: LocalDataV3): string {
   const listKindOverrides: Record<string, ListKindOverride> =
     Object.fromEntries(d.listKindOverrides);
-  return JSON.stringify({ ...d, listKindOverrides });
+  const plannedYears: Record<string, number> = Object.fromEntries(
+    d.plannedYears,
+  );
+  return JSON.stringify({ ...d, listKindOverrides, plannedYears });
 }
 
 export function localDataDefault(): LocalDataV3 {
   return {
     version: 3,
     listKindOverrides: new Map(),
+    plannedYears: new Map(),
     realCourses: [],
     fakeCourses: [],
     native: true,
